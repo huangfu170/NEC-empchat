@@ -1,0 +1,35 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            // "cwd": "${fileDirname}",
+            "args": [
+                "--epoch",
+                "10",
+                "--batch-size",
+                "8",
+                "--topk",
+                "3",
+                "--CL",
+                "--alpha_for_CL",
+                "0.7",
+                "--inference_beam_size",
+                "5",
+                "--config_path",
+                "config.yaml",
+                "--high_freq_nega",
+                "--self_generated",
+                "--emotion_nega"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "3"
+            }
+        }
+    ]
+}

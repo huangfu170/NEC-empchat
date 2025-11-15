@@ -1,0 +1,18 @@
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# PyCharm
+.idea/
+
+# Python
+*.pyc
+
+# Repo-specific
+retrieved_split_*
+
+results_data/
+model_checkpoints/
+DCKS-entity_ranking_model_context_0.19263948602829037/
+DCKS-dataset/

@@ -1,0 +1,13 @@
+nohup python generative_train.py\
+    --model bart-base\
+    --bs 16\
+    --lr 1e-5\
+    --cuda-id 1\
+    --max-hist-len 10\
+    --epoch-num 20\
+    --seed 42\
+    --optimizer adamax \
+    --shuffle \
+    --cuda \
+    --use-prompt \
+    --use-emotion &
