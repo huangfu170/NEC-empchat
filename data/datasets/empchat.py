@@ -422,7 +422,7 @@ class EmpDataset(Dataset):
         if not os.path.exists(cache_file):
             self._save_cached_data(cache_file)
             return
-        self._process_dataset(df, self.model_for_generate, splitname, return_ids)
+        self._process_dataset(df, self.model_for_generate, splitname)
         self._save_cached_data(cache_file)
         print(f"Dataset length: {len(self.data['emotion'])}")
     
@@ -620,8 +620,8 @@ if __name__ == '__main__':
     config_path = '/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml'  # 配置文件路径
     
     # 测试EmpDataset
-    dataset = EmpDataset(config_path, 'train', history_len=10, return_ids=True, use_comet=True, use_entity=True)
-    t=dataset[0]
+    dataset = EmpDataset(config_path, 'train', history_len=10, use_social=True, use_entity=True)
+    t = dataset[0]
     print(t)
     print(f"EmpDataset loaded with {len(dataset)} examples")
     

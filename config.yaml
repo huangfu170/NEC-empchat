@@ -1,12 +1,12 @@
-data_folder: "/mnt/cpfs-data/scripts/train/empdata/DCKS-dataset"
+data_folder: "DCKS-dataset"
 model_checkpoint_folder: "model_checkpoint"
 model_save_folder: "model_save"
 history_length: 10
-comet_model_path: "/mnt/cpfs-data/scripts/train/empdata/model_checkpoint/comet-atomic_2020_BART"
-bert_model_path: "/mnt/cpfs-data/scripts/train/empdata/model_checkpoint/bert-base"
-mpnet_model_path: "/mnt/cpfs-data/scripts/train/empdata/model_checkpoint/mpnet-base"
-bart_model_path: "/mnt/cpfs-data/scripts/train/empdata/model_checkpoint/bart-base"
-ranking_model_path: "/mnt/cpfs-data/scripts/train/empdata/DCKS-entity_ranking_model_context_0.19263948602829037"
+comet_model_path: "model_checkpoint/comet-atomic_2020_BART"
+bert_model_path: "model_checkpoint/bert-base"
+mpnet_model_path: "model_checkpoint/mpnet-base"
+bart_model_path: "model_checkpoint/bart-base"
+ranking_model_path: "DCKS-entity_ranking_model_context_0.19263948602829037"
 device: "cuda:0"
 social_knowledge_file_name:
   train: "DCKS_train_comet_social.pkl"
@@ -14,4 +14,17 @@ social_knowledge_file_name:
 entity_knowledge_file_name:
   train: "DCKS_train_comet_entity.pkl"
   test: "DCKS_test_comet_entity.pkl"
+runtime:
+  cuda_id: 0
+  epoch: 10
+  batch_size: 4
+  topk: 3
+  wo_entity: false
+  wo_social: false
+  alpha_for_CL: 0.7
+  high_freq_nega: false
+  inference_beam_size: 5
+  train_beam_size_for_CL: 10
+  self_generated: false
+  emotion_nega: false
 
