@@ -38,9 +38,6 @@ def compute_lm_loss(logits, label, loss_func):
     return loss_func(shift_logits.view(-1, shift_logits.size(-1)), shift_label.view(-1))
 
 
-def get_encoder():
-    return BartModel.from_pretrained(os.path.join(cfg.data_prefix, 'bart-base/')).encoder
-
 
 class BartModelCustom(BartPretrainedModel):
     _keys_to_ignore_on_load_missing = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight"]
@@ -110,15 +107,10 @@ class BartModelCustom(BartPretrainedModel):
         decoder_attention_mask: Optional[torch.LongTensor] = None,
         social_knowledge: Optional[torch.LongTensor] = None,
         social_knowledge_mask: Optional[torch.Tensor] = None,
-        emotion: Optional[torch.LongTensor] = None,
-        emotion_nega: Optional[torch.LongTensor] = None,
-        high_freq: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
         decoder_head_mask: Optional[torch.Tensor] = None,
         cross_attn_head_mask: Optional[torch.Tensor] = None,
         encoder_outputs: Optional[List[torch.FloatTensor]] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -207,6 +199,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         self.emotion_nega = args.emotion_nega
         self.high_freq_nega = args.high_freq_nega
         self.self_generated = args.self_generated
+        self.CL_sample_num = args.CL_sample_num
 
     def _load_knowl_encoder_weight(self):
         with torch.no_grad():
@@ -482,11 +475,12 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
                 cand_len = cand_ids.size(2)
             if self.emotion_nega:
                 emotion_nega=emotion_nega.to(lm_logits.device)
-                emotion_cand_ids = emotion_nega.view(batch_size, 3, -1)
+                emotion_cand_ids = emotion_nega.view(batch_size, self.CL_sample_num, -1)
                 emotion_cand_len = emotion_cand_ids.size(-1)
             if self.high_freq_nega:
                 high_freq_cand_ids = high_freq.unsqueeze(0).repeat(batch_size, 1, 1)
                 high_freq_cand_len = high_freq_cand_ids.size(-1)
+
             samples_from_batch = decoder_input_ids[None, :, :].repeat(batch_size, 1, 1)
             samples_len = samples_from_batch.size(2)
             #! 这里要注意是否是个tensor

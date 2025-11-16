@@ -8,12 +8,7 @@ import torch
 import tqdm
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from transformers import BartTokenizer, AutoConfig
-
-from config import CFG
-from data.datasets import empchat
-from data.util import seed_everything, compute_metrics
-from model.model import CustomBartForConditionalGeneration
+from data.util import compute_metrics
 
 
 def validate(model, test_dataloader, tokenizer, device, args, epoch):
@@ -74,7 +69,7 @@ def train_validate(model, optimizer, train_loader, valid_loader, tokenizer, devi
     
     # Generate high frequency tokens based on args.high_fre_nega
     if args.high_freq_nega:
-        high_freq_sentences = get_top(args.topk,train_loader)
+        high_freq_sentences = get_top(args.CL_sample_num, train_loader)
         high_freq_tokens = tokenizer(high_freq_sentences, padding=True, return_tensors='pt')[
             'input_ids'].to(device)
     else:
@@ -98,7 +93,7 @@ def train_validate(model, optimizer, train_loader, valid_loader, tokenizer, devi
             # 解包到变量
             context, response, social_knowledge, emotion = tensor_data['context'], tensor_data['response'], tensor_data['social_knowledge'], tensor_data['emotion']
             if args.emotion_nega:
-                emotion_nega = generate_diff_emotion(emotion_to_responses, emotion, tokenizer)
+                emotion_nega = generate_diff_emotion(emotion_to_responses, emotion, tokenizer, args.CL_sample_num)
             else:
                 emotion_nega = None
 
@@ -203,7 +198,6 @@ def get_top(k,train_loader):
     dataset = train_loader.dataset
     data = [res for res in dataset.data['response']]
     new_data = []
-    ngram = []  # 3-gram
     import re
     def simple_word_tokenize(text):
         """

@@ -18,9 +18,10 @@ runtime:
   cuda_id: 0
   epoch: 10
   batch_size: 4
-  topk: 3
+  CL_sample_num: 3
   wo_entity: false
   wo_social: false
+  CL: false
   alpha_for_CL: 0.7
   high_freq_nega: false
   inference_beam_size: 5
