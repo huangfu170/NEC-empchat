@@ -41,7 +41,8 @@ class BeamSearchConfig:
 class EncoderOutputs(ModelOutput):
     x_encoded: torch.FloatTensor=None
     social_knowledge_encoder_outputs: Optional[torch.FloatTensor] = None
-
+    
+@dataclass
 class EncoderMask(ModelOutput):
     x_mask: torch.FloatTensor=None
     social_knowledge_mask: Optional[torch.FloatTensor] = None

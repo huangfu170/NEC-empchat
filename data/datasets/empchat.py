@@ -42,6 +42,7 @@ from data.util import get_score, get_sentence_similarity_model
 # Configuration Constants
 DEFAULT_HISTORY_LENGTH = 10
 DEFAULT_SAMPLE_RATIO = 2
+DEFAULT_DEVICE = 'cpu'  # 默认使用CPU，实际设备从配置文件读取
 ENTITY_RELATIONS = ['ObjectUse', 'AtLocation', 'MadeUpOf', 'HasProperty']
 COMET_RELATIONS = ['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
 
@@ -226,7 +227,7 @@ class RankingDataset(Dataset):
         self.data_folder = self.cfg.get('data_folder', None)
         self.bert_model_path = self.cfg.get('ranking_model_path', None)
         
-        self.device = self.cfg.get('device', 'cuda:0')
+        self.device = torch.device(self.cfg.get('device', DEFAULT_DEVICE))
         
         data_file = os.path.join(self.data_folder, f"DCKS-{splitname}.csv")
         if not os.path.exists(data_file):
@@ -388,7 +389,7 @@ class EmpDataset(Dataset):
         self.model_for_entity_knowledge=cfg.get('ranking_model_path',None)
         self.model_for_social_knowledge=cfg.get('mpnet_model_path',None)
         self.data_folder=cfg.get('data_folder',None)
-        self.device=cfg.get('device','cuda:0')
+        self.device=torch.device(cfg.get('device', DEFAULT_DEVICE))
 
         if use_social:
             social_knowledge_file_name=cfg.get('social_knowledge_file_name',None)[splitname]
@@ -507,15 +508,15 @@ class EmpDataset(Dataset):
         self.data['emotion'].append(EMOTION2LABEL[emotion])
         
         with torch.no_grad():
-            if self.use_comet:
+            if self.use_social:
                 self._process_social_knowledge(
                     c_uttr, example_id
                 )
                 
-                if self.use_entity:
-                    self._process_entity_knowledge(
-                        c_uttr, example_id
-                    )
+            if self.use_entity:
+                self._process_entity_knowledge(
+                    c_uttr, example_id
+                )
     
     def _process_social_knowledge(self, context: str, example_id: int) -> None:
         """Process COMET knowledge for the current example."""
