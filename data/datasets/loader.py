@@ -12,7 +12,6 @@ from torch.nn.utils.rnn import pad_sequence
 from transformers import DataCollatorWithPadding
 
 def create_collate_fn(tokenizer):
-    entity_keys=['ObjectUse', 'AtLocation', 'MadeUpOf', 'HasProperty']
     social_keys=['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
     def collate_fn(batch):
         tokenized_batch=defaultdict(list)
@@ -35,7 +34,14 @@ def create_collate_fn(tokenizer):
                 new_tokenized_batch[k]=tokenizer(tokenized_batch[k],return_tensors='pt',padding=True)
             else:
                 new_tokenized_batch[k]=torch.tensor(tokenized_batch[k],dtype=torch.long)
-        # INSERT_YOUR_CODE
+        # 处理response的padding，将pad token替换为-100以避免计算loss
+        if 'response' in new_tokenized_batch:
+            response_input_ids = new_tokenized_batch['response']['input_ids'].clone()
+            attention_mask = new_tokenized_batch['response']['attention_mask']
+            # 将attention_mask为0的位置（即padding位置）的input_ids设为-100
+            response_input_ids[attention_mask == 0] = -100
+            new_tokenized_batch['response']['input_ids'] = response_input_ids
+        
         # Check if any social_keys are in new_tokenized_batch
         if any(key in new_tokenized_batch for key in social_keys):
             # Collect all present social_keys tensors

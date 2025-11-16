@@ -13,32 +13,27 @@ from transformers import BartTokenizer, AutoConfig
 from config import CFG
 from data.datasets import empchat
 from data.util import seed_everything, compute_metrics
-from question_seperate.model import CustomBartForConditionalGeneration
+from model.model import CustomBartForConditionalGeneration
 
 
 def validate(model, test_dataloader, tokenizer, device, args, epoch):
     print("Validating at epoch {}...".format(epoch))
     model.eval()
     preds = []
-    _responses = []
+    responses = []
     ppls = []
     losses = []
     pbar = tqdm.tqdm(enumerate(test_dataloader), total=len(test_dataloader))
     
     with torch.no_grad():
+        # 使用字典生成式批量处理tensor到device的转换，与train_validate保持一致
+        tensor_keys = ['context', 'response', 'social_knowledge', 'emotion']
         for idx, data in pbar:
-            model.eval()
-            
-            # 使用字典生成式批量处理tensor到device的转换，与train_validate保持一致
-            tensor_keys = ['context', 'response', 'social_knowledge', 'emotion']
             tensor_data = {key: data[key].to(device) if data[key] is not None else None 
                           for key in tensor_keys}
             
             # 解包到变量，与train_validate保持一致
-            context = tensor_data['context'] if 'context' in tensor_keys else None
-            response = tensor_data['response'] if 'response' in tensor_keys else None
-            social_knowledge = tensor_data['social_knowledge'] if 'social_knowledge' in tensor_keys else None
-            emotion = tensor_data['emotion'] if 'emotion' in tensor_keys else None
+            context, response, social_knowledge, emotion = tensor_data['context'], tensor_data['response'], tensor_data['social_knowledge'], tensor_data['emotion']
             
             model.is_training = False
             outputs = model(
@@ -64,10 +59,10 @@ def validate(model, test_dataloader, tokenizer, device, args, epoch):
                 args=args
             )
             preds.extend(pred)
-            _responses.extend([response['input_ids'][i, :] for i in range(response['input_ids'].size(0))])
+            responses.extend([response['input_ids'][i, :] for i in range(response['input_ids'].size(0))])
             
         model.is_training = True
-        _response = pad_sequence(_responses, batch_first=True, padding_value=tokenizer.pad_token_id)
+        _response = pad_sequence(responses, batch_first=True, padding_value=tokenizer.pad_token_id)
         res = compute_metrics((preds, _response.cpu().detach()), 'bart-base', 1, epoch)
         res.update({"ppl": torch.mean(torch.tensor(ppls))})
         return res
@@ -84,24 +79,26 @@ def train_validate(model, optimizer, train_loader, valid_loader, tokenizer, devi
             'input_ids'].to(device)
     else:
         high_freq_tokens = None
+    
+    # 预先构建emotion到responses的映射，避免每个batch都重新遍历dataset
+    emotion_to_responses = None
+    if args.emotion_nega:
+        emotion_to_responses = build_emotion_to_responses_mapping(train_loader)
+    
     for i in range(epoch):
         print(f'start to train the model at epoch {i + 1}................')
         pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader), desc="Epoch {}".format(i))
+        tensor_keys = ['context', 'response', 'social_knowledge', 'emotion']
         for idx, data in pbar:
             model.train()
             # 使用字典生成式批量处理tensor到device的转换，同时处理可能为None的情况
-            tensor_keys = ['context', 'response', 'social_knowledge', 'emotion']
             tensor_data = {key: data[key].to(device) if data[key] is not None else None 
                           for key in tensor_keys}
             
             # 解包到变量
-            context = tensor_data['context'] if 'context' in tensor_keys else None
-            response = tensor_data['response'] if 'response' in tensor_keys else None
-            social_knowledge = tensor_data['social_knowledge'] if 'social_knowledge' in tensor_keys else None
-            emotion = tensor_data['emotion'] if 'emotion' in tensor_keys else None
+            context, response, social_knowledge, emotion = tensor_data['context'], tensor_data['response'], tensor_data['social_knowledge'], tensor_data['emotion']
             if args.emotion_nega:
-                emotion_nega = generate_diff_emotion(train_loader, emotion, device, tokenizer=tokenizer)
-
+                emotion_nega = generate_diff_emotion(emotion_to_responses, emotion, tokenizer)
             else:
                 emotion_nega = None
 
@@ -139,33 +136,45 @@ def train_validate(model, optimizer, train_loader, valid_loader, tokenizer, devi
         train_step += 1
 
 
-def generate_diff_emotion(train_loader, emotions, device, tokenizer,sample_num=3):
+def build_emotion_to_responses_mapping(train_loader):
     """
-    为每个batch内的样例找到指定数量的不同emotion的response
+    预先构建emotion到responses的映射，只需要执行一次
     
     Args:
         train_loader: 训练数据加载器
-        emotions: 当前batch的emotion tensor [batch_size]
-        device: 设备
-        sample_num: 每个样例需要的不同emotion response数量，默认5
     
     Returns:
-        padded_responses: 填充后的不同emotion response tensor
+        emotion_to_responses: dict, emotion到response列表的映射
     """
-    import random
     from collections import defaultdict
     
-    # 获取所有训练数据
-    all_emotions = train_loader.dataset.data['emotion']
-    all_responses = train_loader.dataset.data['response']
-    current_emotions = emotions.tolist()
+    dataset = train_loader.dataset
+    all_emotions = dataset.data['emotion']
+    all_responses = dataset.data['response']
     
-    # 按emotion分组所有response，提高查找效率
     emotion_to_responses = defaultdict(list)
     for emotion, response in zip(all_emotions, all_responses):
         emotion_to_responses[int(emotion)].append(response)
     
-    # 为每个当前emotion找到不同emotion的response
+    return emotion_to_responses
+
+
+def generate_diff_emotion(emotion_to_responses, emotions, tokenizer, sample_num=3):
+    """
+    为每个batch内的样例找到指定数量的不同emotion的response
+    
+    Args:
+        emotion_to_responses: dict, 预构建的emotion到response列表的映射
+        emotions: 当前batch的emotion tensor [batch_size]
+        tokenizer: tokenizer
+        sample_num: 每个样例需要的不同emotion response数量，默认3
+    
+    Returns:
+        flattened_responses: 填充后的不同emotion response tensor
+    """
+    import random
+    
+    current_emotions = emotions.tolist()
     diff_emotion_responses = []
     
     for current_emotion in current_emotions:
@@ -184,6 +193,7 @@ def generate_diff_emotion(train_loader, emotions, device, tokenizer,sample_num=3
             sampled_responses.append(chosen_response)
         
         diff_emotion_responses.append(sampled_responses)
+    
     flattened_responses = [response for responses in diff_emotion_responses for response in responses]
     flattened_responses = tokenizer(flattened_responses, padding=True, return_tensors='pt')['input_ids'].reshape(emotions.size(0), sample_num, -1)
     return flattened_responses
