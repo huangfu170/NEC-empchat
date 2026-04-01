@@ -14,13 +14,15 @@ from collections import defaultdict, namedtuple
 from functools import wraps
 from typing import List, Dict, Any, Tuple
 import yaml
+from nltk import data
+data.path.append(os.path.join(os.path.dirname(__file__), 'nltk_data'))
 import nltk
 import torch
+
 from nltk.corpus import stopwords
 from tqdm import tqdm
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from config import CFG
 from data.datasets import empchat
 
 # Configuration Constants
@@ -213,17 +215,24 @@ class Comet:
 def generate_social_knowledge(dataset, comet_model: Comet, output_filename: str) -> None:
     """Generate social commonsense knowledge for dataset examples."""
     knowledge_results = {}
-    
-    for relation in COMET_SOCIAL_RELATIONS:
-        logger.info(f"Generating knowledge for relation: {relation}")
+    all_events = [clean_text_for_comet(item['last_utterance']) for item in dataset]
+    all_rels = [relation for relation in COMET_SOCIAL_RELATIONS for _ in all_events]
+    all_events_repeated = all_events * len(COMET_SOCIAL_RELATIONS)
+
+    logger.info(f"Generating social knowledge for {len(all_events)} examples x {len(COMET_SOCIAL_RELATIONS)} relations")
+    all_results = []
+    for batch_start in tqdm(range(0, len(all_events_repeated), DEFAULT_BATCH_SIZE), desc="Generating social knowledge"):
+        batch_events = all_events_repeated[batch_start:batch_start + DEFAULT_BATCH_SIZE]
+        batch_rels = all_rels[batch_start:batch_start + DEFAULT_BATCH_SIZE]
+        all_results.extend(comet_model.generate(batch_events, batch_rels))
+
+    n = len(all_events)
+    for rel_idx, relation in enumerate(COMET_SOCIAL_RELATIONS):
         knowledge_results[relation] = {}
-        for example_idx,item in tqdm(enumerate(dataset), desc=f"Processing {relation}",total=len(dataset)):
-            input_event = item['last_utterance']
-            input_event = clean_text_for_comet(input_event)
-            
-            generated_knowledge = comet_model.generate(input_event, relation)
-            knowledge_results[relation][str(example_idx)] = generated_knowledge
-    
+        for example_idx in range(n):
+            start = (rel_idx * n + example_idx) * DEFAULT_NUM_SAMPLES
+            knowledge_results[relation][str(example_idx)] = all_results[start:start + DEFAULT_NUM_SAMPLES]
+
     save_pickle_data(knowledge_results, output_filename)
     logger.info(f"Social knowledge saved to: {output_filename}")
 
@@ -286,38 +295,35 @@ def generate_entity_knowledge(dataset, comet_model: Comet, output_filename: str)
 
 def main():
     """Main execution function."""
-    # Initialize configuration and model
-    with open("/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml", 'r', encoding='utf-8') as f:
+    # Initialize configuration and model / 初始化配置和模型
+    import argparse
+    parser = argparse.ArgumentParser(description="COMET knowledge generation")
+    parser.add_argument("--config_path", default="config.yaml", help="Path to config file")
+    args = parser.parse_args()
+
+    with open(args.config_path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
-    
+
     logger.info("Initializing COMET model...")
     comet_model = Comet(cfg["comet_model_path"], cfg["device"])
-    
-    # Load dataset
+
+    # Load dataset / 加载数据集
     logger.info("Loading dataset...")
     dataset = empchat.EmpDataset(
-        "/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml", 'train', 
-        history_len=10, 
-        return_ids=False, 
-        use_comet=False, 
+        args.config_path, 'test',
+        history_len=10,
+        use_social=False,
         use_emotion=False,
         use_entity=False
     )
-    
-    # Generate knowledge
+
+    # Generate knowledge / 生成知识
     logger.info("Starting knowledge generation...")
-    # generate_entity_knowledge(
-    #     dataset, 
-    #     comet_model,
-    #     os.path.join(cfg['data_folder'], 'DCKS-all_test_comet_entity_pickle.pkl')
-    # )
     generate_social_knowledge(
-        dataset, 
+        dataset,
         comet_model,
-        os.path.join(cfg['data_folder'], 'DCKS-all_train_comet_social_pickle.pkl')
+        os.path.join(cfg['data_folder'], 'DCKS-all_test_comet_social_pickle.pkl')
     )
-    # t=load_pickle_data(os.path.join(cfg['data_folder'], 'DCKS-all_train_comet_entity_pickle.pkl'))
-    # print(t)
     logger.info("Knowledge generation completed successfully!")
 
 

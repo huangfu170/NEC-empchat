@@ -1,0 +1,8 @@
+torch==1.13.1
+transformers==4.30.2
+nltk==3.9.3
+PyYAML==6.0.3
+tqdm==4.67.3
+swanlab==0.7.11
+contractions==0.1.73
+numpy==1.26.4

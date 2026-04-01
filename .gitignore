@@ -3,16 +3,41 @@ build/
 dist/
 *.egg-info/
 
-# PyCharm
+# IDE
 .idea/
+.vscode/
+.claude/
 
 # Python
+__pycache__/
 *.pyc
+
+# Training artifacts / 训练产物
+epoch-*.txt
+swanlog/
+function_timing.log
+model_save/
+
+# Data and models / 数据和模型
+nltk_data*/
+pretrained/
+DCKS-dataset/
+DCKS-entity_ranking_model_context_best/
+DCKS-entity_ranking_model_context_*/
+bart-base/
+bert-base/
+comet-atomic_2020_BART/
+mpnet-base/
+
+# Large files / 大文件
+*.zip
+*.pkl
+
+# Environment / 环境
+.venv/
+__MACOSX/
 
 # Repo-specific
 retrieved_split_*
-
 results_data/
 model_checkpoints/
-DCKS-entity_ranking_model_context_0.19263948602829037/
-DCKS-dataset/

@@ -5,15 +5,16 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
-from config import CFG
 from data.datasets.empchat import RankingDataset
 from data.util import seed_everything
-from question_seperate.model import BertForRanking
+from model.model import BertForRanking
 
 
 def collate_fn(batch):
     p_input_ids = [pt for item in batch if item is not None for pt in item["p_input_ids"]]
     n_input_ids=[nt for item in batch if item is not None for nt in item['n_input_ids']]
+    if len(n_input_ids) == 0 or len(p_input_ids) == 0:
+        return None
     if isinstance(n_input_ids[0],list):
         n_input_ids=[item for sublist in n_input_ids for item in sublist]
     p_label=[1]*len(p_input_ids)
@@ -35,29 +36,31 @@ def collate_fn(batch):
 if __name__ == '__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--cuda-id', type=int, default=1)
+    parser.add_argument('--config-path', type=str, default='config.yaml')
     parser.add_argument('--rand-seed', type=int, default=42)
     args=parser.parse_args()
 
     seed_everything(args.rand_seed)
     device=torch.device('cuda:{}'.format(args.cuda_id)) if torch.cuda.is_available() else torch.device('cpu')
-    train_dataset = RankingDataset('/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml','train')
-    test_dataset = RankingDataset('/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml','test')
+    train_dataset = RankingDataset(args.config_path, 'train')
+    test_dataset = RankingDataset(args.config_path, 'test')
     pad_token_id = 0
 
     train_dataloader= torch.utils.data.DataLoader(train_dataset, batch_size=72, shuffle=True, collate_fn=collate_fn)
     test_dataloader= torch.utils.data.DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=collate_fn)
-    model=BertForRanking.from_pretrained("/home/huangfu/empdialogue_code/empatheticDialogue1/model_checkpoint/bert-base")
-    model.bert.resize_token_embeddings(len(train_dataset.tokenizer))
+    model=BertForRanking.from_pretrained("bert-base")
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
     loss_func=nn.MarginRankingLoss(margin=0.3)
     cross_entropy=nn.CrossEntropyLoss()
-    schechuler=torch.optim.lr_scheduler.StepLR(optimizer,step_size=len(train_dataloader),gamma=0.5)
+    scheduler=torch.optim.lr_scheduler.StepLR(optimizer,step_size=len(train_dataloader),gamma=0.5)
     min_loss=1e5
     for epoch in range(10):
         pbar = tqdm(enumerate(train_dataloader), total=len(train_dataloader))
         for idx, data in pbar:
+            if data is None:
+                continue
 
             model.train()
             pos_data=data['input_ids'][:data['input_ids'].size(0)//2][:16]
@@ -75,7 +78,7 @@ if __name__ == '__main__':
             loss=margin_loss+cls_loss
             loss.backward()
             optimizer.step()
-            schechuler.step()
+            scheduler.step()
             pbar.set_description(f"loss:{loss.cpu().item():.4f},margin_loss:{margin_loss.cpu().item():.4f}")
             pbar.update(1)
 
@@ -84,6 +87,8 @@ if __name__ == '__main__':
         with torch.no_grad():
             loss_total=0
             for vidx,vdata in vbar:
+                if vdata is None:
+                    continue
                 pos_data = vdata['input_ids'][:vdata['input_ids'].size(0) // 2][:128]
                 neg_data = vdata['input_ids'][vdata['input_ids'].size(0) // 2:][:128]
                 pos_margin_logits, pos_logits = model(pos_data.to(device), (pos_data != 0).float().to(device))
@@ -97,8 +102,8 @@ if __name__ == '__main__':
             print(f"valid loss:{loss_total/len(test_dataloader):.4f}")
             if loss_total/len(test_dataloader)<min_loss:
                 min_loss=loss_total/len(test_dataloader)
-                model.save_pretrained(f'DCKS-entity_ranking_model_context_{0.3-min_loss}')
-                train_dataset.tokenizer.save_pretrained(f'DCKS-entity_ranking_model_context_{0.3-min_loss}')
+                model.save_pretrained('DCKS-entity_ranking_model_context_best')
+                train_dataset.tokenizer.save_pretrained('DCKS-entity_ranking_model_context_best')
                 # torch.save(model.state_dict(), f'DCKS-entity_ranking_model_context_{0.3-min_loss}.pt')
                 print('model saved loss is {}'.format(min_loss))
 

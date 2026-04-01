@@ -17,16 +17,14 @@ and preparing data for various downstream tasks.
 import heapq
 import collections
 import os
-import pandas as pd
+import pickle
+import re
 import random
-import math
 from collections import defaultdict
 import yaml
 from time import time
 from typing import List, Dict, Tuple, Optional, Any
 import sys
-print(sys.path)
-print(os.getcwd())
 import contractions
 import torch
 from nltk import word_tokenize
@@ -35,14 +33,14 @@ from torch.utils.data import Dataset
 from tqdm import trange
 from transformers import BertTokenizer, AutoConfig,AutoTokenizer,AutoModel
 import json
-from question_seperate.model import BertForRanking
+from model.model import BertForRanking
 from data.util import get_score, get_sentence_similarity_model
 
 
 # Configuration Constants
 DEFAULT_HISTORY_LENGTH = 10
 DEFAULT_SAMPLE_RATIO = 2
-DEFAULT_DEVICE = 'cpu'  # 默认使用CPU，实际设备从配置文件读取
+DEFAULT_DEVICE = 'cpu'  # Default to CPU; actual device is read from config / 默认使用CPU，实际设备从配置文件读取
 ENTITY_RELATIONS = ['ObjectUse', 'AtLocation', 'MadeUpOf', 'HasProperty']
 COMET_RELATIONS = ['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
 
@@ -220,7 +218,7 @@ class RankingDataset(Dataset):
         if splitname not in ['train', 'test', 'valid']:
             raise ValueError("splitname must be one of: train, test, valid")
         
-        # 正确的YAML读取方式
+        # Proper YAML loading / 正确的YAML读取方式
         with open(config_path, 'r', encoding='utf-8') as f:
             self.cfg = yaml.safe_load(f)
         
@@ -229,7 +227,7 @@ class RankingDataset(Dataset):
         
         self.device = torch.device(self.cfg.get('device', DEFAULT_DEVICE))
         
-        data_file = os.path.join(self.data_folder, f"DCKS-{splitname}.csv")
+        data_file = os.path.join(self.data_folder, f"DCKS-{splitname}_dataset.json")
         if not os.path.exists(data_file):
             raise FileNotFoundError(f"Data file not found: {data_file}")
         
@@ -250,51 +248,28 @@ class RankingDataset(Dataset):
         
         # Initialize BERT tokenizer using configuration
         self.tokenizer = AutoTokenizer.from_pretrained(self.bert_model_path)
-        # self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSK]']})
         self._load_and_process_data(splitname, entity_knowledge)
-        self.tokenizer.add_special_tokens({'additional_special_tokens': ['[CSK]']})
         print(f"Positive examples: {len(self.positive_knowl)}")
         print(f"Negative examples: {len(self.negative_knowl)}")
         print(f"Dataset length: {max(len(self.positive_knowl), len(self.negative_knowl))}")
     
     def _load_and_process_data(self, splitname: str, entity_knowledge: Dict) -> None:
         """Load and process dialogue data with entity knowledge."""
-        # Load data using pandas DataFrame for consistency with EmpDataset
-        data_file = os.path.join(self.data_folder, f"DCKS-{splitname}.csv")
-        df = pd.read_csv(data_file)
-        
-        history = []
-        example_id = 0
-        
-        for i in trange(1, len(df), desc=f"Loading {splitname} data"):
-            if df.iloc[i-1]['conv_id'] == df.iloc[i]['conv_id']:  # Same conversation
-                c_uttr = clean_text(df.iloc[i-1]['utterence'].strip())
-                prevsent = expand_contractions(c_uttr.replace("_comma_", ","))
-                history.append(prevsent)
-                
-                turn_id = int(df.iloc[i]['utterence_idx'])
-                if (turn_id % 2) == 0:
-                    example_id += 1
-                    self.positive_knowl.append([])
-                    self.negative_knowl.append([])
-                    
-                    # Prepare dialogue history
-                    prev_str = self.tokenizer.sep_token.join(
-                        history[-self.max_hist_len:]
-                    )
-                
-                    r_uttr = df.iloc[i]['utterence'].strip()
-                    response = expand_contractions(r_uttr.replace("_comma_", ","))
-                    self.content.append(prev_str)
-                    
-                    # Process entity knowledge
-                    self._process_entity_knowledge(
-                        entity_knowledge, example_id, prev_str, response
-                    )
-                
-                self.ids.append((df.iloc[i]['conv_id'], df.iloc[i]['utterence_idx']))
-            else:
-                history = []
+        data_file = os.path.join(self.data_folder, f"DCKS-{splitname}_dataset.json")
+        with open(data_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        contexts = data['context']
+        responses = data['response']
+
+        for i in trange(len(contexts), desc=f"Loading {splitname} data"):
+            self.positive_knowl.append([])
+            self.negative_knowl.append([])
+            self.content.append(contexts[i])
+
+            self._process_entity_knowledge(
+                entity_knowledge, i + 1, contexts[i], responses[i]
+            )
     
     def _process_entity_knowledge(self, entity_knowledge: Dict, 
                                 example_id: int, prev_str: str, response: str) -> None:
@@ -382,7 +357,7 @@ class EmpDataset(Dataset):
         if splitname not in ['train', 'test', 'valid']:
             raise ValueError("splitname must be one of: train, test, valid")
         
-        # 正确的YAML读取方式
+        # Proper YAML loading / 正确的YAML读取方式
         with open(config_path, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f)
         self.model_for_generate=cfg.get('bart_model_path',None)
@@ -390,6 +365,8 @@ class EmpDataset(Dataset):
         self.model_for_social_knowledge=cfg.get('mpnet_model_path',None)
         self.data_folder=cfg.get('data_folder',None)
         self.device=torch.device(cfg.get('device', DEFAULT_DEVICE))
+        self.entity_device=torch.device(cfg.get('entity_device', self.device))
+        self.social_device=torch.device(cfg.get('social_device', self.device))
 
         if use_social:
             social_knowledge_file_name=cfg.get('social_knowledge_file_name',None)[splitname]
@@ -408,22 +385,22 @@ class EmpDataset(Dataset):
         cache_file = os.path.join(self.data_folder, f"DCKS-{splitname}_dataset.json")
         if os.path.exists(cache_file):
             self._load_cached_data(cache_file)
-            return
+            if 'last_utterance' in self.data:
+                return
         
         # Initialize processors and models
         self.relation_processor = AtomicRelationProcessor()
         self._initialize_knowledge_models(use_social)
         
         # Load and process data
-        data_file = os.path.join(self.data_folder, f"DCKS-{splitname}.csv")
+        pkl_name = 'val.pkl' if splitname == 'valid' else f"{splitname}.pkl"
+        data_file = os.path.join(self.data_folder, pkl_name)
         if not os.path.exists(data_file):
             raise FileNotFoundError(f"Data file not found: {data_file}")
-        df = pd.read_csv(data_file)
+        with open(data_file, 'rb') as f:
+            raw_data = pickle.load(f)
 
-        if not os.path.exists(cache_file):
-            self._save_cached_data(cache_file)
-            return
-        self._process_dataset(df, self.model_for_generate, splitname)
+        self._process_dataset(raw_data, splitname)
         self._save_cached_data(cache_file)
         print(f"Dataset length: {len(self.data['emotion'])}")
     
@@ -446,7 +423,7 @@ class EmpDataset(Dataset):
         """Initialize knowledge models and processors if needed."""
         self.generate_model_tokenizer = AutoTokenizer.from_pretrained(self.model_for_generate)
         if self.use_entity:
-            self.entity_score_model = BertForRanking.from_pretrained(self.model_for_entity_knowledge).to(self.device)
+            self.entity_score_model = BertForRanking.from_pretrained(self.model_for_entity_knowledge).to(self.entity_device)
             self.entity_score_model_tokenizer = AutoTokenizer.from_pretrained(self.model_for_entity_knowledge)
             self.entity_score_model_tokenizer.add_special_tokens({'additional_special_tokens': ['[CSK]']})
             self.CSK_id = self.entity_score_model_tokenizer.convert_tokens_to_ids('[CSK]')
@@ -461,45 +438,39 @@ class EmpDataset(Dataset):
             
             # Initialize similarity model for COMET knowledge scoring
             self.social_score_model_tokenizer = AutoTokenizer.from_pretrained(self.model_for_social_knowledge)
-            self.social_score_model = AutoModel.from_pretrained(self.model_for_social_knowledge).to(self.device)
+            self.social_score_model = AutoModel.from_pretrained(self.model_for_social_knowledge).to(self.social_device)
     
-    def _process_dataset(self, df: pd.DataFrame, opt_model: str, 
-                        splitname: str, ) -> None:
-        """Process the dataset and extract features."""
-        # Load knowledge sources if needed
+    @staticmethod
+    def _detokenize(text: str) -> str:
+        text = re.sub(r' ([.,!?;:\'\)\]\}])', r'\1', text)
+        text = re.sub(r'([\(\[\{]) ', r'\1', text)
+        return text
+
+    def _process_dataset(self, raw_data: dict, splitname: str) -> None:
+        """Process the pkl dataset and extract features."""
         if self.use_social:
             self.comet_knowledge = load_comet_knowledge(self.social_knowledge_file)
-            if self.use_entity:
-                self.entity_knowledge = load_comet_knowledge(self.entity_knowledge_file)
-        
-        # Initialize data structure
-        self.data = defaultdict(list)
-        history = []
-        example_id, turn_id = 0, 0
-        
-        for i in trange(1, len(df), desc=f"Loading {splitname} data"):
-            if df.iloc[i-1]['conv_id'] == df.iloc[i]['conv_id']:
-                c_uttr = clean_text(df.iloc[i-1]['utterence'].strip())
-                c_uttr = expand_contractions(c_uttr.replace("_comma_", ","))
-                r_uttr = df.iloc[i]['utterence'].strip()
-                r_uttr = expand_contractions(r_uttr.replace("_comma_", ","))
-                history.append(c_uttr)
-                turn_id = int(df.iloc[i]['utterence_idx'])
-                
-                if (turn_id % 2) == 0:
-                    example_id += 1
-                    emotion = df.iloc[i]['emotion']
-                    
-                    # Prepare context
-                    
-                    context = self.generate_model_tokenizer.eos_token.join(history[-self.max_hist_len:])
-                    response = r_uttr
-                    self._process_knowledge(context, response, emotion, example_id)
-                    self.data['context'].append(context)
-                    self.data['response'].append(response)
+        if self.use_entity:
+            self.entity_knowledge = load_comet_knowledge(self.entity_knowledge_file)
 
-            else:
-                history = []
+        self.data = defaultdict(list)
+        n = len(raw_data['context'])
+
+        for i in trange(n, desc=f"Loading {splitname} data"):
+            utterances = raw_data['context'][i][-self.max_hist_len:]
+            context = self._detokenize(
+                self.generate_model_tokenizer.eos_token.join(
+                    ' '.join(tokens) for tokens in utterances
+                )
+            )
+            response = self._detokenize(' '.join(raw_data['target'][i]))
+            emotion = str(raw_data['emotion'][i])
+
+            last_utterance = self._detokenize(' '.join(raw_data['context'][i][-1]))
+            self._process_knowledge(context, response, emotion, i + 1)
+            self.data['context'].append(context)
+            self.data['last_utterance'].append(last_utterance)
+            self.data['response'].append(response)
     
 
     def _process_knowledge(self, c_uttr: str, response: str, 
@@ -528,10 +499,7 @@ class EmpDataset(Dataset):
             know_score_and_knowledge = get_social_knowledge_score(
                 self.social_score_model, self.social_score_model_tokenizer, context, know
             )
-            self.data[relation].append(know_score_and_knowledge[0][1]) # 按照分数排序的knowledge
-            # self.data[relation].append(
-            #     tokenizer(know[know_indices[0]], return_tensors='pt')['input_ids'].squeeze(0)
-            # )
+            self.data[relation].append(know_score_and_knowledge[0][1]) # Knowledge sorted by score / 按照分数排序的knowledge
     
     def _process_entity_knowledge(self, c_uttr: str, example_id: int) -> None:
         """Process entity knowledge for the main dataset."""
@@ -602,11 +570,11 @@ class EmpDataset(Dataset):
         t=dict([(k, self.data[k][index]) for k in self.data])
         if not self.use_social:
             for k in COMET_RELATIONS:
-                t.pop(k)
+                t.pop(k, None)
         if not self.use_entity:
-            t.pop('entity_knowledge')
+            t.pop('entity_knowledge', None)
             for k in ENTITY_RELATIONS:
-                t.pop(k)
+                t.pop(k, None)
         return t
     
     def getid(self, index: int) -> Tuple[str, str]:
@@ -618,14 +586,14 @@ class EmpDataset(Dataset):
 
 if __name__ == '__main__':
     # Example usage
-    config_path = '/home/huangfu/empdialogue_code/empatheticDialogue1/config.yaml'  # 配置文件路径
+    config_path = sys.argv[1] if len(sys.argv) > 1 else 'config.yaml'
     
-    # 测试EmpDataset
+    # Test EmpDataset / 测试EmpDataset
     dataset = EmpDataset(config_path, 'train', history_len=10, use_social=True, use_entity=True)
     t = dataset[0]
     print(t)
     print(f"EmpDataset loaded with {len(dataset)} examples")
     
-    # 测试RankingDataset  
+    # Test RankingDataset / 测试RankingDataset  
     # ranking_dataset = RankingDataset(config_path, 'test', history_len=10)
     # print(f"RankingDataset loaded with {len(ranking_dataset)} examples")

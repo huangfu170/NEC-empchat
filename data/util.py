@@ -5,24 +5,23 @@
 # LICENSE file in the root directory of this source tree.
 #
 
-import argparse
 import collections
 import json
-import logging
-import math
 import os
 import sys
 from typing import List
 
+from nltk import data as nltk_data
+nltk_data.path.append(os.path.join(os.path.dirname(__file__), '..', 'nltk_data'))
+
 import torch
 import tqdm
 from torch.nn.utils.rnn import pad_sequence
-from torch import logsumexp
 from transformers import AutoTokenizer, AutoModel
 
 
 from metrics.distinct.distinct import Distinct
-from nltk.translate.bleu_score import corpus_bleu, sentence_bleu, SmoothingFunction
+from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 from nltk import word_tokenize
 from torch.nn import functional as F
 from dataclasses import dataclass
@@ -118,7 +117,7 @@ def get_entity_knowl(data, rel_list):
     res = [pad_sequence(res[i], batch_first=True, padding_value=1) for i in range(len(res))] if res else None
     res = torch.cat(res, dim=1) if res else None
 
-    # size:(四种常识所含的实体数，最长的用于评分的长度)
+    # size: (number of entities across 4 relation types, max scoring sequence length) / size:(四种常识所含的实体数，最长的用于评分的长度)
     scores = torch.cat(scores, dim=0) if scores else None
     return res, scores
 def get_knowledge(data, rel_list):
@@ -135,7 +134,7 @@ def get_knowledge(data, rel_list):
     else:
         return t[0]
 def get_score(model,tokenizer,source,candidate):
-    return get_similarities(model, source,candidate, tokenizer, 'cuda:0')
+    return get_similarities(model, source,candidate, tokenizer, model.device)
 
 
 def count_dataset(dataset):
@@ -199,10 +198,10 @@ class BeamHypotheses(object):
         if len(self) < self.num_beams or score > self.worst_score:
             self.beams.append((score, hyp,beam_indices))
             if len(self) > self.num_beams:
-                #当前存的已经超过num_beams，也就是加入新的之后为beam width+1
-                sorted_scores = sorted([(s, idx) for idx, (s, _ , _) in enumerate(self.beams)]) #默认按照tuple第一索引排序
-                del self.beams[sorted_scores[0][1]] # 最低的分数对应的id
-                self.worst_score = sorted_scores[1][0] # 更新最低分数
+                #Current count exceeds num_beams, i.e. beam width+1 after adding new one / 当前存的已经超过num_beams，也就是加入新的之后为beam width+1
+                sorted_scores = sorted([(s, idx) for idx, (s, _ , _) in enumerate(self.beams)]) # Sort by first tuple element by default / 默认按照tuple第一索引排序
+                del self.beams[sorted_scores[0][1]] # Delete the ID with the lowest score / 最低的分数对应的id
+                self.worst_score = sorted_scores[1][0] # Update the worst score / 更新最低分数
             else:
                 self.worst_score = min(score, self.worst_score)
 
@@ -218,7 +217,7 @@ class BeamHypotheses(object):
             return True
         else:
             cur_score = best_sum_logprobs / cur_len ** self.length_penalty
-            ret = self.worst_score >= cur_score # 现在best_score对应的概率还比不上worst_score
+            ret = self.worst_score >= cur_score # Current best_score probability is worse than worst_score / 现在best_score对应的概率还比不上worst_score
             return ret
 
 @torch.no_grad()
@@ -299,31 +298,31 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
         next_batch_beam=[]
         for batch_idx in range(bs):
             if done[batch_idx]:
-                next_batch_beam.extend([(0,pad_token_id,0)]*beam_width) #这个batch如果已经结束了，那么就补pad
+                next_batch_beam.extend([(0,pad_token_id,0)]*beam_width) # Pad finished batches / 这个batch如果已经结束了，那么就补pad
                 continue
             
             next_sent_beam=[]
-            # 检查这个batch_idx的所有候选token
+            # Check all candidate tokens for this batch_idx / 检查这个batch_idx的所有候选token
             for beam_token_rank, (beam_token_id, beam_token_score) in enumerate(
                         zip(next_tokens[batch_idx], next_scores[batch_idx])
             ):
-                # beam_token_rank : 当前这个token_id和score的在beam中的排序位置
+                # beam_token_rank: rank position of this token_id and score in the beam / beam_token_rank: 当前这个token_id和score的在beam中的排序位置
                 beam_id = beam_token_id // vocab_size
                 token_id = beam_token_id % vocab_size
 
                 effective_beam_id = batch_idx * beam_width + beam_id
 
                 if (eos_token_id is not None) and (token_id.item() == eos_token_id):
-                    # 如果当前预测的词是eos_id
-                    is_beam_token_worse_than_top_width_beams = beam_token_rank >= beam_width 
-                    # 如果eos_token_id对应的词其实在beam_width之后，则句子结束的置信度比较低
-                    # 需要判断它在词表概率里的位置，如果大于beam width表示其实并不在我们的正常beam width的选择范围内,
-                    # 那么跳过这个eos，换别的词
+                    # If the current predicted token is eos_id / 如果当前预测的词是eos_id
+                    is_beam_token_worse_than_top_width_beams = beam_token_rank >= beam_width
+                    # If eos_token_id ranks beyond beam_width, the sentence-ending confidence is low / 如果eos_token_id对应的词其实在beam_width之后，则句子结束的置信度比较低
+                    # Check its position in vocab probabilities; if beyond beam_width it's outside normal selection range, / 需要判断它在词表概率里的位置，如果大于beam width表示其实并不在我们的正常beam width的选择范围内,
+                    # so skip this eos and pick another token / 那么跳过这个eos，换别的词
                     if is_beam_token_worse_than_top_width_beams:
                         continue
                     beam_index = beam_indices[effective_beam_id] + (effective_beam_id,) if beam_indices else None
 
-                    # 合理的句子结束
+                    # Valid sentence ending / 合理的句子结束
                     generated_hyps[batch_idx].add(
                         decoder_input_ids[effective_beam_id].clone(),
                         beam_token_score.item(),
@@ -335,9 +334,9 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
 
                 if len(next_sent_beam) == beam_width:
                     break
-            # 当前sentence的状态如果原来为结束就无所谓，如果是原来不是结束，那么就要判断
-            # 当前sentence的最大概率词是不是比历史最低的概率还要低，如果是的话则直接结束
-            # 出于可信度的判断
+            # If sentence was already done, no change; otherwise check whether / 当前sentence的状态如果原来为结束就无所谓，如果是原来不是结束，那么就要判断
+            # the current max-probability token scores lower than the historical worst — if so, stop early / 当前sentence的最大概率词是不是比历史最低的概率还要低，如果是的话则直接结束
+            # based on confidence / 出于可信度的判断
             done[batch_idx] = done[batch_idx] or generated_hyps[batch_idx].is_done(
                 next_scores[batch_idx].max().item(), cur_len
             )
@@ -349,10 +348,10 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
         if all(done):
             break
 
-        assert len(next_batch_beam) == bs * beam_width #一个token处理结束
+        assert len(next_batch_beam) == bs * beam_width # One token step finished / 一个token处理结束
         # new function creates a tensor with device same as called variable
         beam_scores = beam_scores.new([x[0] for x in next_batch_beam]) # beam_token_score
-        beam_tokens = decoder_input_ids.new([x[1] for x in next_batch_beam]) # token_id 这轮的token
+        beam_tokens = decoder_input_ids.new([x[1] for x in next_batch_beam]) # token_id for this round / token_id 这轮的token
         beam_idx = decoder_input_ids.new([x[2] for x in next_batch_beam]) # effective_beam_id
         beam_indices = tuple((beam_indices[beam_idx[i]] + (beam_idx[i],) for i in range(len(beam_indices))))
 
@@ -367,7 +366,7 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
         if eos_token_id is not None and all(
             (token_id % vocab_size).item() != eos_token_id for token_id in next_tokens[batch_idx]
         ):
-            #如果现在所有预测词都不是eos
+            #If none of the predicted tokens is eos / 如果现在所有预测词都不是eos
             assert torch.all(
                 next_scores[batch_idx, :beam_width] == beam_scores.view(bs, beam_width)[batch_idx]
             ), "If batch_idx is not done, final next scores: {} have to equal to accumulated beam_scores: {}".format(
@@ -386,8 +385,8 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
     output_batch_size = bs
     output_num_return_sequences_per_batch = num_return_sequences
 
-    sent_lengths=decoder_input_ids.new(output_batch_size*output_num_return_sequences_per_batch) #在当前decode step后的各句子长度
-    best=[] #用来存当前decode step 对应的hyp
+    sent_lengths=decoder_input_ids.new(output_batch_size*output_num_return_sequences_per_batch) # Sentence lengths after current decode step / 在当前decode step后的各句子长度
+    best=[] # Store hypotheses for current decode step / 用来存当前decode step 对应的hyp
     best_indices=[]
     best_scores=torch.zeros(bs * beam_width, device=device)
     for i,hypotheses in enumerate(generated_hyps):
@@ -397,7 +396,7 @@ def beam_search(model, input_ids, attention_mask, social_knowledge=None, social_
 
             best_hyp_tuple=sorted_hyps.pop()
             best_score=best_hyp_tuple[0]
-            best_hyp = best_hyp_tuple[1]# 当前的best句子
+            best_hyp = best_hyp_tuple[1] # Current best sentence / 当前的best句子
             best_index=best_hyp_tuple[2]
 
             sent_lengths[effective_batch_idx] = len(best_hyp)
@@ -461,7 +460,7 @@ def calc_corpus_bleu_new(hypothesis, references):
         "bleu4":b4
     }
 
-def compute_metrics(eval_pred, model_name, pad_token_id, epoch,need_print=True):
+def compute_metrics(eval_pred, tokenizer, pad_token_id, epoch, need_print=True, output_dir="."):
     '''
 
     :param eval_pred: Tuple(label,logits) size:(BS,seq_len)
@@ -469,8 +468,6 @@ def compute_metrics(eval_pred, model_name, pad_token_id, epoch,need_print=True):
     '''
 
     predictions, labels, = eval_pred
-
-    tokenizer, vocab_size = get_tokenizer(model_name)
     pred=[torch.tensor(i) for i in predictions]
     distinct = Distinct(3)
     
@@ -480,15 +477,13 @@ def compute_metrics(eval_pred, model_name, pad_token_id, epoch,need_print=True):
                                                                                                            skip_special_tokens=True)
     predictions=predictions[::len(predictions)//len(labels)]
     tlabels,tpredictions=[word_tokenize(l.strip()) for l in labels],[word_tokenize(p.strip()) for p in predictions]
-    print(tpredictions[:10]) #打印前十个看看
 
-    # print("-----------------预测---------------------------")
     if need_print:
-        with open("epoch-{}.txt".format(epoch), "w") as f:
+        with open(os.path.join(output_dir, "epoch-{}.txt".format(epoch)), "w") as f:
             for i in range(len(labels)):
                 if len(predictions[i]) < 4:
-                    # 这里为什么需要做str(j)??
-                    f.write("".join([str(j) for j in labels[i]]) + "\t" + "Prediction 长度小于4" + "".join(
+                    # Why do we need str(j) here? / 这里为什么需要做str(j)??
+                    f.write("".join([str(j) for j in labels[i]]) + "\t" + "Prediction length < 4" + "".join(
                         [str(j) for j in predictions[i]]) + "\n")
                 else:
                     f.write(

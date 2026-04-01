@@ -12,7 +12,7 @@ from transformers.models.bart.modeling_bart import BartEncoder, BartConfig, Bart
 
 from config import CFG
 from data.util import beam_search,EncoderOutputs,EncoderMask,Seq2SeqModelOutput,BeamSearchConfig
-from model.Decoder import MyBartDecoder
+from model.decoder import MyBartDecoder
 from transformers.utils import ModelOutput
 
 
@@ -74,10 +74,10 @@ class BartModelCustom(BartPretrainedModel):
         '''
         description:
         param {*} self
-        param {torch.Tensor} x 输入encoder的文本input_ids(对话历史和回复)
-        param {torch.Tensor} x_mask 输入encoder的文本对应的attention_mask
-        param {torch.Tensor} social_knowledge 输入encoder的社会知识,形状为[bs,social_knowledge_num,social_knowledge_len]
-        param {torch.Tensor} social_knowledge_mask 输入encoder的社会知识对应的attention_mask,形状为[bs,social_knowledge_num,social_knowledge_len]
+        param {torch.Tensor} x Text input_ids fed to the encoder (dialogue history and reply) / 输入encoder的文本input_ids(对话历史和回复)
+        param {torch.Tensor} x_mask Attention mask for the text fed to the encoder / 输入encoder的文本对应的attention_mask
+        param {torch.Tensor} social_knowledge Social knowledge fed to the encoder, shape [bs, social_knowledge_num, social_knowledge_len] / 输入encoder的社会知识,形状为[bs,social_knowledge_num,social_knowledge_len]
+        param {torch.Tensor} social_knowledge_mask Attention mask for the social knowledge fed to the encoder, shape [bs, social_knowledge_num, social_knowledge_len] / 输入encoder的社会知识对应的attention_mask,形状为[bs,social_knowledge_num,social_knowledge_len]
         return {*} x_encoded, social_knowledge_encoder_outputs
         '''
 
@@ -136,17 +136,14 @@ class BartModelCustom(BartPretrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if encoder_outputs is None:
-            # entity_encoder_outputs通常是None
+            # entity_encoder_outputs is usually None / entity_encoder_outputs通常是None
             encoder_outputs = self.get_encoder_outputs(
                 input_ids, attention_mask, social_knowledge, social_knowledge_mask
             )
 
-        # emotion_pred = self.emo_linear(encoder_outputs.mean(dim=1) + knowl_encoder_outputs.mean(dim=1))
-        # emotion_loss_func = CrossEntropyLoss()
-        # emotion_loss = emotion_loss_func(emotion_pred, emotion)
         emotion_loss = 0
         encoder_mask = EncoderMask(x_mask=attention_mask, social_knowledge_mask=social_knowledge_mask)
-        # TODO:对于无常识的部分应该直接给0
+        # TODO: For parts without commonsense knowledge, should directly assign 0 / 对于无常识的部分应该直接给0
 
         # decoder outputs consists of (dec_features, past_key_value, dec_hidden, dec_attn)
         decoder_outputs = self.decoder(
@@ -192,7 +189,6 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         self.lm_head = nn.Linear(config.d_model, self.model.shared.num_embeddings, bias=False)
         self.linear_layer = nn.Linear(config.d_model, config.d_model)
         self.pad_id = 1
-        # self.ranking_model=BertForRanking(bert_config)
         self.is_training = True
         self.post_init()
         self.CL_flag = args.CL
@@ -200,6 +196,11 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         self.high_freq_nega = args.high_freq_nega
         self.self_generated = args.self_generated
         self.CL_sample_num = args.CL_sample_num
+        self.cl_max_candidates = getattr(args, 'cl_max_candidates', 64)
+        self.cl_gold_bleu_threshold = getattr(args, 'cl_gold_bleu_threshold', 0.99)
+        self.cl_ranking_margin = getattr(args, 'cl_ranking_margin', 0.01)
+        self.cl_bleu_ngram = getattr(args, 'cl_bleu_ngram', 2)
+        self.train_beam_size = getattr(args, 'train_beam_size_for_CL', 10)
 
     def _load_knowl_encoder_weight(self):
         with torch.no_grad():
@@ -211,7 +212,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
 
     def sample_from_model(self, input_ids=None, attention_mask=None, social_knowledge=None, social_knowledge_mask=None, emotion=None):
 
-        beam_size = 5
+        beam_size = self.train_beam_size
         self.is_training = False
         batch_size = input_ids.size(0)
         cand_ids = beam_search(
@@ -221,7 +222,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         return cand_ids.view(batch_size, beam_size, -1)
 
     def ranking_loss(self, cos_distance, bleu_distance):
-        margin = 0.01
+        margin = self.cl_ranking_margin
         ones = torch.ones(cos_distance.size(), device=cos_distance.device)
         loss_func = torch.nn.MarginRankingLoss(0.0)
         total_loss = loss_func(cos_distance, cos_distance, ones)
@@ -256,18 +257,18 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         self,
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        knowl: Optional[torch.LongTensor] = None,
-        entity_knowledge: Optional[torch.LongTensor] = None,
+        social_knowledge: Optional[torch.LongTensor] = None,
         args=None,
+        social_knowledge_mask: Optional[torch.Tensor] = None,
     ):
         beam_size = args.inference_beam_size
         ret_dict = beam_search(
-            self, input_ids, attention_mask, knowl, entity_knowledge, None, beam_size, num_return_sequences=beam_size
+            self, input_ids, attention_mask, social_knowledge, social_knowledge_mask, None, beam_size, num_return_sequences=beam_size
         )
         cand_ids = ret_dict["sequences"]
         cand_mask = (cand_ids != 1).long()
         if args.alpha_for_CL == 0:
-            # 正常的beam search
+            # Normal beam search / 正常的beam search
             cand_ids = cand_ids.view(input_ids.size(0), beam_size, -1)
             return cand_ids[:, 0, :]
 
@@ -291,7 +292,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
         cos_distance = torch.cosine_similarity(
             encoder_feature.unsqueeze(1), decoder_feature, dim=-1
         )  # batch x sample_num
-        scores = ret_dict["sequences_scores"].view(input_ids.size(0), -1)  # 最后一个词对应的概率 (bs,)
+        scores = ret_dict["sequences_scores"].view(input_ids.size(0), -1)  # Probability of the last token (bs,) / 最后一个词对应的概率 (bs,)
         normalize = torch.sum(0 - scores, keepdim=True, dim=-1)
         score = (1 - args.alpha_for_CL) * (scores / normalize) + args.alpha_for_CL * cos_distance
         cand_ids = cand_ids.view(input_ids.size(0), beam_size, -1)
@@ -375,7 +376,6 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
             )
             == 0.0
         ).to(torch.float)
-        # print(sim_matrix.size(), sys_ngram_mask.size(), ref_ngram_mask.size())
         sim_matrix *= sys_ngram_mask.unsqueeze(3) * ref_ngram_mask.unsqueeze(1).unsqueeze(2)
         sim_matrix = torch.sum(torch.max(sim_matrix, dim=-1).values, dim=-1)
 
@@ -390,7 +390,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
 
     def unify_length(self, input_tensor, source_length, max_length):
         if source_length < max_length:
-            # 长就截断，短就补齐
+            # Truncate if longer, pad if shorter / 长就截断，短就补齐
             input_tensor = self.pad2max_len(input_tensor, max_length)
         else:
             input_tensor = input_tensor[:, :, :max_length]
@@ -438,14 +438,9 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
             decoder_attention_mask=decoder_input_ids!=self.config.pad_token_id,
             social_knowledge=social_knowledge,
             social_knowledge_mask=social_knowledge_mask,
-            emotion=emotion,
-            emotion_nega=emotion_nega,
-            high_freq=high_freq,
-            head_mask=head_mask,
             decoder_head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
             past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
             decoder_inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -466,11 +461,11 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
 
         if self.is_training and self.CL_flag:
             cand_len, emotion_cand_len, high_freq_cand_len = 0, 0, 0
+            cand_ids, emotion_cand_ids, high_freq_cand_ids = None, None, None
             encoder_outputs= self.model.get_encoder_outputs(
                 input_ids, attention_mask, social_knowledge, social_knowledge_mask
             )
-            # ! 这里应该是个隐藏的bug，需要检查他们是否存在
-            if self.self_generated: 
+            if self.self_generated:
                 cand_ids = self.sample_from_model(input_ids=input_ids, attention_mask=attention_mask, social_knowledge=social_knowledge, social_knowledge_mask=social_knowledge_mask, emotion=emotion)
                 cand_len = cand_ids.size(2)
             if self.emotion_nega:
@@ -483,7 +478,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
 
             samples_from_batch = decoder_input_ids[None, :, :].repeat(batch_size, 1, 1)
             samples_len = samples_from_batch.size(2)
-            #! 这里要注意是否是个tensor
+            #! Note: check whether this is a tensor / 这里要注意是否是个tensor
             max_length = max(samples_len, high_freq_cand_len, emotion_cand_len, cand_len)
             samples_from_batch = self.unify_length(samples_from_batch, samples_len, max_length)
             samples_all = [samples_from_batch]
@@ -498,22 +493,20 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
                 samples_all.append(cand_ids)
 
             samples_all = torch.cat(samples_all, dim=1)
-            actual_distance = self.torch_bleu(decoder_input_ids, samples_all, self.pad_id, 2)
+            actual_distance = self.torch_bleu(decoder_input_ids, samples_all, self.pad_id, self.cl_bleu_ngram)
 
-            distance_mask = actual_distance < 0.99  # use to mask the gold
+            distance_mask = actual_distance < self.cl_gold_bleu_threshold  # use to mask the gold
             actual_distance_masked = actual_distance * distance_mask.float()
 
-            sample_num = min(64, actual_distance_masked.size(1) - 1)
+            sample_num = min(self.cl_max_candidates, actual_distance_masked.size(1) - 1)
             actual_distance, actual_indices = torch.sort(actual_distance_masked, dim=-1, descending=True)
-            # 对每个样本选出bleu值最大的sample_num个样本,扔掉最差的一个
+            # For each sample, select the top sample_num candidates by BLEU, discard the worst one / 对每个样本选出bleu值最大的sample_num个样本,扔掉最差的一个
             sampled_actual_distance = actual_distance[:, :sample_num]
             sampled_actual_indices = actual_indices[:, :sample_num]
 
             self_indices = torch.arange(0, batch_size).reshape(batch_size, 1).to(
                 sampled_actual_indices.device
-            ) + cand_ids.size(
-                1
-            )  # manually add gold
+            ) + (cand_ids.size(1) if cand_ids is not None else 0)  # manually add gold
 
             sampled_indices = torch.cat([self_indices, sampled_actual_indices], dim=-1)
 
@@ -534,7 +527,7 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
                     input_ids=sampled_input_dec,
                     attention_mask=sample_pad_mask,
                     encoder_hidden_states=encoder_outputs,
-                    encoder_attention_mask=EncoderMask(x_mask=attention_mask),
+                    encoder_attention_mask=EncoderMask(x_mask=attention_mask, social_knowledge_mask=social_knowledge_mask),
                 )
 
                 decoder_feature = decoder_out.last_hidden_state  # batch x tgt_len x hidden
@@ -562,7 +555,6 @@ class CustomBartForConditionalGeneration(BartPretrainedModel):
 class BertForRanking(BertPreTrainedModel):
     def __init__(self, config):
         super(BertForRanking, self).__init__(config)
-        # self.bert = DebertaV2Model(config)
         self.bert = BertModel(config)
 
         self.multi_stage_discriminator = nn.Sequential(

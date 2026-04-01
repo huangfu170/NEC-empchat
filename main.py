@@ -1,25 +1,26 @@
 import argparse
-import logging
-from datetime import datetime
+import os
 from types import SimpleNamespace
 
+import swanlab
+
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from transformers import BartTokenizer, AutoConfig
 
 from data.datasets.empchat import EmpDataset
 from data.util import seed_everything
 from data.datasets.loader import create_collate_fn
-from question_seperate.model import CustomBartForConditionalGeneration
+from model.model import CustomBartForConditionalGeneration
 from train import train_validate
 import yaml
 
 
 def load_config():
-    """
-    Load YAML once so both runtime and static settings share one namespace.
-    Only the config path itself stays on the CLI.
-    """
     parser = argparse.ArgumentParser(
         description="Empathetic dialog training entrypoint.")
     parser.add_argument(
@@ -41,39 +42,33 @@ def load_config():
     return SimpleNamespace(**cfg_dict)
 
 
-if __name__ == '__main__':
-    cfg = load_config()
+def setup_distributed(rank, world_size, gpu_ids):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29500'
+    device_id = gpu_ids[rank]
+    torch.cuda.set_device(device_id)
+    dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+    return torch.device(f'cuda:{device_id}')
 
-    if any([cfg.self_generated, cfg.emotion_nega, cfg.high_freq_nega]):
-        logging_file_name = "CL"
-        logging_file_name += f"_alpha{cfg.alpha_for_CL}"
-        logging_file_name += f"_tbs{cfg.train_beam_size_for_CL}"
-    else:
-        logging_file_name = ""
 
-    if not cfg.wo_entity:
-        logging_file_name += '_ek'
-    logging_file_name += f"_ibs{cfg.inference_beam_size}"
-    logging_file_name += f"_bs{cfg.batch_size}"
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=datetime.now().strftime('%Y-%m-%d') + logging_file_name + '.log'
-    )
-    logging.info(f"{cfg}")
+def cleanup_distributed():
+    dist.destroy_process_group()
 
-    seed_everything(42)
 
-    rel_list = ['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
-    entity_rel_list = ['ObjectUse', 'AtLocation', 'MadeUpOf', 'HasProperty']
+def main(rank, world_size, cfg, gpu_ids):
+    device = setup_distributed(rank, world_size, gpu_ids)
+
+    if rank == 0:
+        swanlab.init(project="NEC-empchat", config=vars(cfg))
+
+    seed_everything(42 + rank)
+
     tokenizer = BartTokenizer.from_pretrained(cfg.bart_model_path)
-    knowledge_prompt = '<s>The following knowledge facts are highly relevant to the left query:</s>'
     bart_config = AutoConfig.from_pretrained(cfg.bart_model_path)
-    device = torch.device(
-        f'cuda:{cfg.cuda_id}' if torch.cuda.is_available() else 'cpu')
     model = CustomBartForConditionalGeneration.from_pretrained(
-        cfg.bart_model_path,
-        config=bart_config, args=cfg
+        cfg.bart_model_path, config=bart_config, args=cfg
     ).to(device)
+    model = DDP(model, device_ids=[gpu_ids[rank]], find_unused_parameters=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
     history_len = getattr(cfg, 'history_length', 10)
@@ -85,10 +80,12 @@ if __name__ == '__main__':
         use_social=not cfg.wo_social,
         use_entity=not cfg.wo_entity
     )
+    train_sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(
         dataset,
-        cfg.batch_size,
+        batch_size=cfg.per_gpu_batch_size,
         shuffle=False,
+        sampler=train_sampler,
         collate_fn=create_collate_fn(tokenizer)
     )
 
@@ -99,18 +96,25 @@ if __name__ == '__main__':
         use_social=not cfg.wo_social,
         use_entity=not cfg.wo_entity
     )
+    valid_sampler = DistributedSampler(valid_dataset, num_replicas=world_size, rank=rank, shuffle=False)
     valid_dataloader = DataLoader(
         valid_dataset, 16, shuffle=False,
-        collate_fn=create_collate_fn(tokenizer))
-    train_validate(
-        model,
-        optimizer,
-        dataloader,
-        valid_dataloader,
-        tokenizer,
-        device,
-        None,
-        cfg,
-        0,
-        cfg.epoch
+        sampler=valid_sampler,
+        collate_fn=create_collate_fn(tokenizer)
     )
+
+    train_validate(
+        model, optimizer, dataloader, valid_dataloader,
+        tokenizer, device, None, cfg, 0, cfg.epoch, rank, world_size
+    )
+
+    if rank == 0:
+        swanlab.finish()
+    cleanup_distributed()
+
+
+if __name__ == '__main__':
+    cfg = load_config()
+    gpu_ids = cfg.gpu_ids
+    world_size = len(gpu_ids)
+    mp.spawn(main, args=(world_size, cfg, gpu_ids), nprocs=world_size, join=True)

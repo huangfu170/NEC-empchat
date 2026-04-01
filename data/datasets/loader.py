@@ -3,54 +3,70 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-#
 
 from collections import defaultdict
+from typing import List, Dict, Any
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
-from transformers import DataCollatorWithPadding
+import torch.nn.functional as F
+from transformers import PreTrainedTokenizer
 
-def create_collate_fn(tokenizer):
-    social_keys=['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
-    def collate_fn(batch):
-        tokenized_batch=defaultdict(list)
-        prompt1='<s>The following knowledge facts are highly relevant to the left query:</s>'
-        prompt2='<s>query:</s>'
-        keys=batch[0].keys()
-        if 'entity_knowledge' in keys:
-            for i,item in enumerate(batch):
-                if len(item['entity_knowledge'])>0:
-                    batch[i]['context']=prompt2+item['context']+prompt1+tokenizer.eos_token.join(item['entity_knowledge'])
-                else:
-                    batch[i]['context']=prompt2+item['context']
+SOCIAL_KEYS = ['xReact', 'xNeed', 'xIntent', 'xEffect', 'xWant']
 
-        for k in keys:
-            tokenized_batch[k] = [item[k] for item in batch if k in item]
-        tokenized_batch.pop('entity_knowledge')
-        new_tokenized_batch={}
-        for k in tokenized_batch:
-            if k not in ['emotion']:
-                new_tokenized_batch[k]=tokenizer(tokenized_batch[k],return_tensors='pt',padding=True)
-            else:
-                new_tokenized_batch[k]=torch.tensor(tokenized_batch[k],dtype=torch.long)
-        
-        # Check if any social_keys are in new_tokenized_batch
-        if any(key in new_tokenized_batch for key in social_keys):
-            # Collect all present social_keys tensors
-            present_social_keys = [key for key in social_keys if key in new_tokenized_batch]
-            # Get the list of tensors to stack, pad to the same length
-            social_tensors = [new_tokenized_batch[key]['input_ids'] for key in present_social_keys]
-            # Find max length for padding
-            max_len = max(t.size(1) for t in social_tensors)
-            padded_social_tensors = [torch.nn.functional.pad(t, (0, max_len - t.size(1)), value=tokenizer.pad_token_id) for t in social_tensors]
-            # Stack along new dimension (len(social_keys), batch, seq)
-            stacked_social = torch.stack(padded_social_tensors, dim=1)  # (batch, num_social, seq)
-            new_tokenized_batch['social_knowledge'] = stacked_social
-            # Optionally, remove the individual keys
-            for key in present_social_keys:
-                new_tokenized_batch.pop(key)
-        return new_tokenized_batch
+ENTITY_KNOWLEDGE_PREFIX = '<s>The following knowledge facts are highly relevant to the left query:</s>'
+QUERY_PREFIX = '<s>query:</s>'
+
+
+def _inject_entity_knowledge(batch: List[Dict], tokenizer: PreTrainedTokenizer) -> None:
+    """Prepend entity knowledge facts into each example's context in-place."""
+    for item in batch:
+        if item['entity_knowledge']:
+            knowledge_str = tokenizer.eos_token.join(item['entity_knowledge'])
+            item['context'] = QUERY_PREFIX + item['context'] + ENTITY_KNOWLEDGE_PREFIX + knowledge_str
+        else:
+            item['context'] = QUERY_PREFIX + item['context']
+
+
+def _tokenize_fields(batch: List[Dict], tokenizer: PreTrainedTokenizer) -> Dict[str, Any]:
+    """Collect and tokenize all fields except entity_knowledge."""
+    keys = [k for k in batch[0].keys() if k != 'entity_knowledge']
+    result = {}
+    for k in keys:
+        values = [item[k] for item in batch]
+        if k == 'emotion':
+            result[k] = torch.tensor(values, dtype=torch.long)
+        else:
+            result[k] = tokenizer(values, return_tensors='pt', padding=True)
+    return result
+
+
+def _merge_social_knowledge(tokenized: Dict[str, Any], tokenizer: PreTrainedTokenizer) -> None:
+    """Stack individual social relation tensors into a single 'social_knowledge' tensor in-place."""
+    present_keys = [k for k in SOCIAL_KEYS if k in tokenized]
+    if not present_keys:
+        return
+
+    tensors = [tokenized[k]['input_ids'] for k in present_keys]
+    max_len = max(t.size(1) for t in tensors)
+    padded = [
+        F.pad(t, (0, max_len - t.size(1)), value=tokenizer.pad_token_id)
+        for t in tensors
+    ]
+    # shape: (batch, num_relations, seq_len)
+    tokenized['social_knowledge'] = torch.stack(padded, dim=1)
+
+    for k in present_keys:
+        del tokenized[k]
+
+
+def create_collate_fn(tokenizer: PreTrainedTokenizer):
+    def collate_fn(batch: List[Dict]) -> Dict[str, Any]:
+        if 'entity_knowledge' in batch[0]:
+            _inject_entity_knowledge(batch, tokenizer)
+
+        tokenized = _tokenize_fields(batch, tokenizer)
+        _merge_social_knowledge(tokenized, tokenizer)
+
+        return tokenized
+
     return collate_fn
-
-

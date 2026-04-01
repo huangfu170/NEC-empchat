@@ -2,30 +2,37 @@ data_folder: "DCKS-dataset"
 model_checkpoint_folder: "model_checkpoint"
 model_save_folder: "model_save"
 history_length: 10
-comet_model_path: "model_checkpoint/comet-atomic_2020_BART"
-bert_model_path: "model_checkpoint/bert-base"
-mpnet_model_path: "model_checkpoint/mpnet-base"
-bart_model_path: "model_checkpoint/bart-base"
-ranking_model_path: "DCKS-entity_ranking_model_context_0.19263948602829037"
+comet_model_path: "pretrained/comet-atomic_2020_BART"
+bert_model_path: "pretrained/bert-base"
+mpnet_model_path: "pretrained/mpnet-base"
+bart_model_path: "pretrained/bart-base"
+ranking_model_path: "DCKS-entity_ranking_model_context_best"
 device: "cuda:0"
+entity_device: "cuda:0"
+social_device: "cuda:0"
 social_knowledge_file_name:
-  train: "DCKS_train_comet_social.pkl"
-  test: "DCKS_test_comet_social.pkl"
+  train: "DCKS-all_train_comet_social_pickle.pkl"
+  test: "DCKS-all_test_comet_social_pickle.pkl"
 entity_knowledge_file_name:
-  train: "DCKS_train_comet_entity.pkl"
-  test: "DCKS_test_comet_entity.pkl"
+  train: "DCKS-all_train_comet_entity_pickle.pkl"
+  test: "DCKS-all_test_comet_entity_pickle.pkl"
 runtime:
-  cuda_id: 0
+  gpu_ids: [0]
+
   epoch: 10
-  batch_size: 4
+  per_gpu_batch_size: 4
   CL_sample_num: 3
   wo_entity: false
   wo_social: false
-  CL: false
+  CL: true
   alpha_for_CL: 0.7
-  high_freq_nega: false
+  high_freq_nega: true
   inference_beam_size: 5
   train_beam_size_for_CL: 10
-  self_generated: false
-  emotion_nega: false
+  self_generated: true
+  emotion_nega: true
+  cl_max_candidates: 64
+  cl_gold_bleu_threshold: 0.99
+  cl_ranking_margin: 0.01
+  cl_bleu_ngram: 2
 
